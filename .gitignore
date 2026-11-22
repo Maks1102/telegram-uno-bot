@@ -1,0 +1,8 @@
+.env
+history.db
+venv/
+.venv/
+__pycache__/
+*.pyc
+.idea/
+.vscode/
