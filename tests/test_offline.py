@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -99,6 +100,36 @@ def test_routing() -> None:
     print(f"ok: роутер {router.name!r}, порядок {names}")
 
 
+def test_load_config() -> None:
+    """load_config() должен собирать Config целиком, включая все поля."""
+    from config import load_config
+
+    env = {
+        "BOT_TOKEN": "123:TEST",
+        "LLM_BASE_URL": "http://localhost:1234/v1/",
+        "LLM_MODEL": "",
+        "HISTORY_LIMIT": "8",
+        "HISTORY_DB": "test-history.db",
+    }
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    try:
+        cfg = load_config()
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    assert cfg.bot_token == "123:TEST"
+    assert cfg.llm_base_url == "http://localhost:1234/v1"  # слэш обрезан
+    assert cfg.llm_model == ""
+    assert cfg.history_limit == 8
+    assert cfg.history_db == "test-history.db"
+    print("ok: load_config собирает Config целиком")
+
+
 def test_history_store(db_path: Path) -> None:
     store = HistoryStore(db_path)
     uid = 42
@@ -159,6 +190,7 @@ async def test_tutor(base_url: str, db_path: Path) -> None:
 
 
 def main() -> None:
+    test_load_config()
     test_knowledge()
     test_routing()
     with tempfile.TemporaryDirectory() as tmp:

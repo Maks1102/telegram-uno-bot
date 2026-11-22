@@ -39,4 +39,5 @@ def load_config() -> Config:
         llm_timeout=float(os.getenv("LLM_TIMEOUT", "120")),
         llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1200")),
         history_limit=max(0, int(os.getenv("HISTORY_LIMIT", "16"))),
+        history_db=os.getenv("HISTORY_DB", "history.db").strip() or "history.db",
     )
