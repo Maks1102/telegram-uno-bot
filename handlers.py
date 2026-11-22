@@ -13,6 +13,7 @@ from aiogram.types import ErrorEvent, Message
 from knowledge import TOPICS, get_topic, split_message
 from keyboards import QUIZ_BUTTON, RESET_BUTTON, main_keyboard
 from llm import get_tutor
+from tgmd import md_to_html, split_html, strip_tags
 
 router = Router(name="uno-instructor")
 logger = logging.getLogger(__name__)
@@ -57,15 +58,25 @@ LLM_ERROR = (
 INTERNAL_ERROR = "⚠️ Внутренняя ошибка. Попробуй ещё раз позже."
 
 
-async def _answer(message: Message, text: str) -> Message | None:
-    """Отправляет сообщение, повторяя при флуд-контроле Telegram."""
+async def _answer(message: Message, text: str, parse_mode: str | None = None) -> Message | None:
+    """Отправляет сообщение, повторяя при флуд-контроле Telegram.
+
+    Если Telegram не смог распарсить разметку — повторяет отправку очищенным
+    текстом: важнее доставить ответ, чем сохранить форматирование.
+    """
     for _ in range(3):
         try:
-            return await message.answer(text, reply_markup=main_keyboard())
+            return await message.answer(
+                text, reply_markup=main_keyboard(), parse_mode=parse_mode
+            )
         except TelegramRetryAfter as e:
             logger.warning("Flood control: ждём %s с перед повтором", e.retry_after)
             await asyncio.sleep(e.retry_after)
-        except TelegramBadRequest:
+        except TelegramBadRequest as e:
+            if parse_mode:
+                logger.warning("Telegram отверг разметку (%s) — шлю без неё", e)
+                text, parse_mode = strip_tags(text), None
+                continue
             logger.exception("Telegram отклонил сообщение (chat_id=%s)", message.chat.id)
             return None
     return None
@@ -99,8 +110,9 @@ async def _ask_ai(message: Message, user_text: str, extra: str | None = None) ->
         except TelegramBadRequest:
             logger.debug("Не удалось удалить placeholder", exc_info=True)
 
-    for part in split_message(answer):
-        await _answer(message, part)
+    # Markdown от модели -> HTML Telegram; режем с учётом незакрытых тегов
+    for part in split_html(md_to_html(answer)):
+        await _answer(message, part, parse_mode="HTML")
 
 
 @router.message(CommandStart())
@@ -122,7 +134,8 @@ async def cmd_reset(message: Message) -> None:
 @router.message(F.text.in_(TOPICS))
 async def send_topic(message: Message) -> None:
     """Быстрый ответ из локальной справки, без ИИ."""
-    await _answer(message, get_topic(message.text))
+    for part in split_message(get_topic(message.text)):
+        await _answer(message, part)
 
 
 @router.message(F.text == QUIZ_BUTTON)

@@ -5,7 +5,8 @@
   2. чтение справок и разбивку длинных сообщений;
   3. порядок роутера (specific -> generic) и служебные кнопки;
   4. хранилище истории (SQLite);
-  5. Tutor: авто-выбор модели, системный промпт, историю, сброс,
+  5. конвертер Markdown модели в HTML Telegram (tgmd.py);
+  6. Tutor: авто-выбор модели, системный промпт, историю, сброс,
      подсказку при пустом ответе и повтор с увеличенным лимитом.
 
 Запуск из корня проекта:  python tests/test_offline.py
@@ -16,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -246,10 +248,61 @@ async def test_empty_answer(base_url: str, db_path: Path) -> None:
     print("ok: подсказка при пустом ответе + повтор с увеличенным лимитом")
 
 
+def test_tgmd() -> None:
+    """Markdown от модели -> HTML Telegram: разбор, экранирование, разбивка."""
+    from tgmd import LIMIT, _open_tags, md_to_html, split_html, strip_tags
+
+    # инлайн-разметка
+    h = md_to_html("**Жирный** и *курсив*, `код` и ~~зачёркнутый~~")
+    assert "<b>Жирный</b>" in h, h
+    assert "<i>курсив</i>" in h, h
+    assert "<code>код</code>" in h, h
+    assert "<s>зачёркнутый</s>" in h, h
+    assert "**" not in h and "~~" not in h, h
+
+    # блочная разметка: заголовки, маркированные и нумерованные списки
+    h = md_to_html("## Правила UNO\n\n- первый\n- второй\n\n1. раз\n2. два")
+    assert "<b>Правила UNO</b>" in h and "#" not in h, h
+    assert "• первый" in h and "• второй" in h, h
+    assert "1. раз" in h and "2. два" in h, h
+
+    # экранирование: сырой < или & Telegram отвергает целиком
+    raw = "5 < 6 & 7 > 2, кавычки \"тут\""
+    assert strip_tags(md_to_html(raw)) == raw, md_to_html(raw)
+
+    # блок кода не разбирается как markdown внутри
+    h = md_to_html("```python\n**не жирный**\n```")
+    assert "<pre>" in h and "<b>" not in h, h
+    assert "**не жирный**" in h, h
+
+    # непарные ** от модели просто убираются
+    assert "**" not in md_to_html("**не закрылось"), md_to_html("**не закрылось")
+
+    # ссылка, включая & в URL
+    h = md_to_html("[UNO](https://example.com/a?b=1&c=2)")
+    assert '<a href="https://example.com/a?b=1&amp;c=2">UNO</a>' in h, h
+
+    # разбивка длинного HTML: каждая часть в лимите, теги закрыты, пустых нет
+    long = md_to_html("Абзац с **жирным** и кодом `x`.\n\n" * 400)
+    parts = split_html(long)
+    assert len(parts) > 1, "длинный ответ не разбился"
+    for p in parts:
+        assert len(p) <= LIMIT, len(p)
+        assert p.strip(), "пустая часть"
+        assert not _open_tags(p), f"незакрытые теги: {_open_tags(p)}"
+        assert not re.search(r"<(b|i|s|code|a)\b[^>]*></\1>", p), "пустая сущность"
+
+    # один кусок без разметки и пустой ввод
+    assert split_html("коротко") == ["коротко"]
+    assert md_to_html("") == ""
+    print("ok: конвертер Markdown -> HTML Telegram")
+
+
 def main() -> None:
     test_load_config()
     test_knowledge()
     test_routing()
+    test_tgmd()
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         test_history_store(tmp_path / "history.db")
@@ -262,7 +315,8 @@ def main() -> None:
             asyncio.run(test_empty_answer(base_url, tmp_path / "tutor2.db"))
         finally:
             server.shutdown()
-    print("\nВсе офлайн-проверки пройдены ✅")
+    # без эмодзи: консоль Windows с cp1251 не умеет их печатать и падает
+    print("\nВсе офлайн-проверки пройдены (OK)")
 
 
 if __name__ == "__main__":
