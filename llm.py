@@ -12,6 +12,9 @@ from history import HistoryStore
 
 logger = logging.getLogger(__name__)
 
+#: Потолок для авто-повтора с увеличенным лимитом токенов
+MAX_TOKENS_RETRY_CAP = 8192
+
 SYSTEM_PROMPT = """Ты — «Уно-Инструктор»: дружелюбный, точный и структурированный помощник, который обучает пользователей картам и правилам карточных игр серии UNO («Уно»). Ты не игрок и не ведущий партии по умолчанию — ты инструктор, тренер и справочник.
 
 ТВОЯ ЦЕЛЬ:
@@ -86,6 +89,45 @@ def get_tutor() -> Tutor:
     return _tutor
 
 
+def _reasoning_of(message: object) -> str:
+    """Достаёт «рассуждения» (reasoning), если модель их прислала."""
+    extra = getattr(message, "model_extra", None) or {}
+    value = (
+        getattr(message, "reasoning_content", None)
+        or extra.get("reasoning_content")
+        or extra.get("reasoning")
+        or ""
+    )
+    return str(value).strip()
+
+
+def _empty_answer_hint(choice: object) -> str:
+    """Понятная подсказка пользователю, когда модель не вернула текста."""
+    has_reasoning = bool(_reasoning_of(choice.message))
+    if choice.finish_reason == "length":
+        if has_reasoning:
+            return (
+                "⚠️ Модель израсходовала лимит токенов на внутренние рассуждения "
+                "и не успела написать ответ.\n\n"
+                "Что сделать:\n"
+                "• в .env поставь LLM_REASONING_EFFORT=none (выключить «мышление»)\n"
+                "• или увеличи LLM_MAX_TOKENS (например, до 4096)"
+            )
+        return (
+            "⚠️ Ответ не влез в лимит токенов и обрезан.\n"
+            "Увеличь LLM_MAX_TOKENS в .env (например, до 4096) и повтори вопрос."
+        )
+    if has_reasoning:
+        return (
+            "⚠️ Модель написала только внутренние рассуждения, итогового ответа нет.\n"
+            "Поставь в .env LLM_REASONING_EFFORT=none или выключи «Thinking» в LM Studio."
+        )
+    return (
+        "⚠️ Модель вернула пустой ответ.\n"
+        "Проверь, что модель загружена в LM Studio с чат-шаблоном (chat template)."
+    )
+
+
 class Tutor:
     """Ведёт диалоги пользователей и отправляет их локальной модели."""
 
@@ -97,6 +139,7 @@ class Tutor:
         )
         self._model = cfg.llm_model
         self._max_tokens = cfg.llm_max_tokens
+        self._reasoning_effort = cfg.llm_reasoning_effort
         self._history_limit = cfg.history_limit
         self._store = HistoryStore(cfg.history_db)
 
@@ -126,20 +169,50 @@ class Tutor:
         )
         messages.append({"role": "user", "content": user_text})
 
-        response = await self._client.chat.completions.create(
-            model=await self._resolve_model(),
-            messages=messages,
-            temperature=0.7,
-            max_tokens=self._max_tokens,
-        )
+        request: dict = {
+            "model": await self._resolve_model(),
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": self._max_tokens,
+        }
+        if self._reasoning_effort:
+            # 'none' отключает «мышление» thinking-моделей (Qwen3 и т.п.)
+            request["reasoning_effort"] = self._reasoning_effort
 
-        answer = (response.choices[0].message.content or "").strip()
+        response = await self._client.chat.completions.create(**request)
+        choice = response.choices[0]
+        answer = (choice.message.content or "").strip()
+
+        # Лимит ушёл в «мышление» или обрезал ответ — пробуем ещё раз с большим бюджетом.
+        if not answer and choice.finish_reason == "length" and self._max_tokens < MAX_TOKENS_RETRY_CAP:
+            retry_limit = min(self._max_tokens * 2, MAX_TOKENS_RETRY_CAP)
+            logger.warning(
+                "Пустой ответ по лимиту токенов, повтор с max_tokens=%d", retry_limit
+            )
+            request["max_tokens"] = retry_limit
+            response = await self._client.chat.completions.create(**request)
+            choice = response.choices[0]
+            answer = (choice.message.content or "").strip()
+
+        self._log_response(choice, response)
         if not answer:
-            answer = "Модель вернула пустой ответ. Попробуй переформулировать вопрос."
+            answer = _empty_answer_hint(choice)
 
         await asyncio.to_thread(self._store.append, user_id, "user", user_text, self._history_limit)
         await asyncio.to_thread(self._store.append, user_id, "assistant", answer, self._history_limit)
         return answer
+
+    @staticmethod
+    def _log_response(choice: object, response: object) -> None:
+        usage = getattr(response, "usage", None)
+        logger.info(
+            "LLM: finish=%s, content=%d симв., reasoning=%d симв., токены=%s/%s",
+            choice.finish_reason,
+            len(choice.message.content or ""),
+            len(_reasoning_of(choice.message)),
+            getattr(usage, "prompt_tokens", "?") if usage else "?",
+            getattr(usage, "completion_tokens", "?") if usage else "?",
+        )
 
     async def reset(self, user_id: int) -> None:
         """Очищает историю диалога пользователя."""
