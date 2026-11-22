@@ -1,0 +1,15 @@
+# Оверлей для NVIDIA GPU: подключается поверх docker-compose.yml
+# Меняет образ на CUDA-сборку и отдаёт все слои модели на GPU.
+#
+# docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+services:
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

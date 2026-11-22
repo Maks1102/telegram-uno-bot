@@ -28,6 +28,24 @@ python bot.py
 
 Linux/macOS: `python3 -m venv venv && source venv/bin/activate`, далее аналогично.
 
+### Запуск в Docker (автоматически всё сразу)
+
+Если Docker установлен, бот и модель поднимаются **одной командой** — без ручного `python bot.py`:
+
+```powershell
+cd docker
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+```
+
+- бот собирается из `Dockerfile` в корне и сам выполняет `python bot.py`;
+- `docker-compose.gpu.yml` не нужен, если GPU нет (тогда `NGL=0` в `docker/.env`);
+- логи: `docker compose logs -f bot`, стоп: `docker compose down`;
+- история диалогов пишется в `docker/data/history.db` и переживает пересборку;
+- `BOT_TOKEN` и настройки LLM берутся из `.env` проекта (в образ не попадают — см. `.dockerignore`);
+- модель и её веса в git не попадают (`.gitignore`: `docker/models/`, `*.gguf`).
+
+⚠️ Если бот уже запущен на хосте через `python bot.py` — сначала останови его, иначе Telegram даст 409 Conflict (один токен — один polling).
+
 ## LM Studio (сейчас)
 
 1. Установи [LM Studio](https://lmstudio.ai), скачай и **загрузи** модель (см. «Какую модель выбрать» ниже).
@@ -38,34 +56,68 @@ Linux/macOS: `python3 -m venv venv && source venv/bin/activate`, далее ан
    LLM_MODEL=          # пусто = бот сам возьмёт загруженную модель
    ```
 
-## llama.cpp в Docker (на другом компьютере)
+## llama.cpp в Docker (готовый набор в `docker/`)
 
-На машине с моделью:
+Папка `docker/` — самодостаточный набор: его можно скопировать на любой компьютер с Docker.
 
-```bash
-docker run -d --name llama-server -p 8080:8080 \
-  -v /путь/к/моделям:/models \
-  ghcr.io/ggml-org/llama.cpp:server \
-  --host 0.0.0.0 --port 8080 \
-  -m /models/твоя-модель.gguf -c 8192 -ngl 99
+```
+docker/
+  docker-compose.yml       сервер llama.cpp + сервис бота (всё в одном)
+  docker-compose.gpu.yml   оверлей: CUDA-образ + все слои на NVIDIA GPU
+  .env                     модель, контекст, слои на GPU, порт, адрес LLM для бота
+  download-model.ps1       скачивание GGUF с Hugging Face
+  models/                  здесь лежат файлы моделей (в git не попадает)
+  data/                    history.db бота (создастся при старте)
 ```
 
-- `-ngl 99` — сколько слоёв унести на GPU (на чистом CPU убери флаг).
-- На Windows Docker Desktop путь к моделям: `-v C:\Users\You\models:/models`.
-- Убедись, что порт 8080 доступен по локальной сети (брандмауэр).
+**1. Скачай модель** (~4.2 ГБ, один раз):
 
-В `.env` на компьютере с ботом:
+```powershell
+powershell -File docker\download-model.ps1
+# другая модель:
+powershell -File docker\download-model.ps1 -Repo "unsloth/Qwen3.5-9B-GGUF" -File "Qwen3.5-9B-Q4_K_M.gguf"
+```
+
+**2. Запусти всё** — модель и бота, одной командой (с NVIDIA GPU):
+
+```powershell
+cd docker
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+```
+
+Без GPU: `docker compose up -d` и в `docker/.env` поставь `NGL=0`. Бот собирается из `Dockerfile` и стартует сам; он ждёт, пока модель станет healthy (`depends_on`).
+
+**3. Проверь:**
+
+```powershell
+# с корня проекта — должен ответить содержательным текстом
+python tests/diagnose_lmstudio.py
+
+# логи бота и модели
+docker compose logs -f bot
+docker compose logs -f llama
+```
+
+**4. Бот вне Docker?** Если запускаешь `python bot.py` на хосте, подключи его к контейнеру в `.env` проекта:
 
 ```env
-LLM_BASE_URL=http://192.168.1.10:8080/v1
-LLM_MODEL=          # или точное имя модели из /v1/models
+LLM_BASE_URL=http://localhost:8080/v1
+LLM_MODEL=          # пусто = авто
 ```
 
-Оба сервера отдают OpenAI-совместимый API, поэтому бот не различает их — меняется только `LLM_BASE_URL`.
+В compose адрес задаётся автоматически: `BOT_LLM_BASE_URL` в `docker/.env` (по умолчанию `http://llama:8080/v1` — имя сервиса в сети, а не localhost).
+
+Полезные команды: `docker compose logs -f` (логи), `docker compose down` (стоп), `docker compose pull` (обновить образ).
+
+**Перенос на другой компьютер:** скопируй папку `docker/` (модель можно не качать заново — просто переложи файл в `docker/models/`), поставь Docker, запусти по шагам 2–4. Если на той машине нет NVIDIA GPU — `NGL=0` в `docker/.env`. Бот и контейнер могут жить на разных машинах: в `LLM_BASE_URL` укажи IP сервера, например `http://192.168.1.10:8080/v1` (открой порт 8080 в брандмауэре).
+
+Оба варианта (LM Studio и llama.cpp) отдают OpenAI-совместимый API, поэтому бот не различает их — меняется только `LLM_BASE_URL`.
 
 ## Какую модель выбрать
 
-Важнее всего **русский язык** и следование инструкциям. Ориентир по памяти (GGUF, квантование ~Q4_K_M) — актуальность проверяй на Hugging Face, выходят новые версии:
+**По умолчанию в `docker/` лежит gemma-4-E4B (QAT, 4.2 ГБ)** — компактная, быстрая, без «мышления»; влезает в GPU с большим запасом. Скачать другую можно скриптом `docker\download-model.ps1 -Repo ... -File ...`.
+
+Если хочется большего качества — ориентир по памяти (GGUF, квантование ~Q4_K_M), актуальность проверяй на Hugging Face:
 
 | Память GPU/RAM | Модели | Комментарий |
 |---|---|---|
@@ -98,11 +150,14 @@ LLM_MODEL=          # или точное имя модели из /v1/models
 
 ```
 bot.py           точка входа (polling, закрытие сессии при остановке)
+Dockerfile       образ бота: зависимости + автозапуск python bot.py
+.dockerignore    что не попадает в образ (.env, модель, venv, тесты)
 config.py        чтение .env
 handlers.py      команды, кнопки-справки, вопросы в ИИ, обработчик ошибок
 keyboards.py     reply-клавиатура
 llm.py           клиент локальной LLM + системный промпт «Уно-Инструктор»
 history.py       история диалогов в SQLite (переживает перезапуски)
+docker/          llama.cpp + бот в Docker: compose-файлы, скачивание моделей, models/, data/
 knowledge/       готовые тексты справок (кнопки работают без ИИ)
   cards.md       карты: эффекты, когда играть, ошибки
   rules.md       основы классического UNO

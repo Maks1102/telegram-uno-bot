@@ -1,0 +1,23 @@
+# Контекст сборки — корень проекта. В образ НЕ тащим:
+
+# окружение и кеш
+.venv/
+venv/
+.git/
+.idea/
+.vscode/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# секреты и данные: приходят на лету (env_file / тома)
+.env
+history.db
+data/
+
+# гигабайты и лишнее: модель (3.9 ГБ!), compose-набор, тесты, доки
+docker/
+tests/
+README.md
+Dockerfile
+.dockerignore

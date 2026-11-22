@@ -1,0 +1,50 @@
+# llama.cpp сервер + бот «Уно-Инструктор» — запуск всего одной командой
+# Запуск:            docker compose up -d          (CPU)
+# Запуск с GPU:      docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# Только модель:     docker compose up -d llama
+# Только бот:        docker compose up -d bot
+# Остановка:         docker compose down
+# Логи:              docker compose logs -f        (или logs -f bot)
+
+services:
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: uno-llama
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - ./models:/models
+    command:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8080"
+      - --jinja
+      - -m
+      - "${MODEL_FILE:-/models/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf}"
+      - -c
+      - "${CTX:-8192}"
+      - -ngl
+      - "${NGL:-0}"
+
+  # Бот: собирается из Dockerfile в корне проекта и сам запускает python bot.py.
+  # .env проекта (BOT_TOKEN и настройки LLM) подключается через env_file.
+  bot:
+    build:
+      context: ..            # корень проекта — там лежит Dockerfile
+      dockerfile: Dockerfile
+    container_name: uno-bot
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      # Внутри compose-сети бот ходит к модели по имени сервиса, а не по
+      # localhost (localhost в контейнере — это сам контейнер).
+      LLM_BASE_URL: ${BOT_LLM_BASE_URL:-http://llama:8080/v1}
+      # История диалогов переживает пересборку образа
+      HISTORY_DB: /app/data/history.db
+    volumes:
+      - ./data:/app/data     # здесь будет history.db
+    depends_on:
+      llama:
+        condition: service_healthy   # ждём, пока модель загрузится
